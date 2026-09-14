@@ -30,7 +30,16 @@ BASE_MODEL = "Qwen/Qwen2.5-3B"
 TRAIN_FILE = "data/train.jsonl"
 VALIDATION_FILE = "data/validation.jsonl"
 
-OUTPUT_DIR = "models/customer-support-llama"
+# Local fallback
+OUTPUT_DIR = os.getenv(
+    "MODEL_OUTPUT_DIR",
+    "models/customer-support-qwen",
+)
+
+# Example:
+# your-hf-user/customer-support-qwen-qlora
+HF_MODEL_REPO = os.getenv("HF_MODEL_REPO")
+
 
 MAX_SEQUENCE_LENGTH = 256
 
@@ -53,40 +62,34 @@ TARGET_MODULES = [
 
 
 def main():
-
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "CUDA GPU not found. "
-            "Run training on Google Colab with a T4 GPU."
+            "CUDA GPU not found. Run training on Google Colab with a T4 GPU."
         )
 
-    print(
-        "GPU:",
-        torch.cuda.get_device_name(0),
-    )
+    print("GPU:", torch.cuda.get_device_name(0))
 
     hf_token = os.getenv("HF_TOKEN")
 
     if not hf_token:
+        raise ValueError("HF_TOKEN missing.")
+
+    if not HF_MODEL_REPO:
         raise ValueError(
-            "HF_TOKEN missing."
+            "HF_MODEL_REPO missing. "
+            "Example: username/customer-support-qwen-qlora"
         )
 
     login(
         token=hf_token,
-        add_to_git_credential=True,
+        add_to_git_credential=False,
     )
 
-    wandb_key = os.getenv(
-        "WANDB_API_KEY"
-    )
-
+    wandb_key = os.getenv("WANDB_API_KEY")
     use_wandb = bool(wandb_key)
 
     if use_wandb:
-        wandb.login(
-            key=wandb_key
-        )
+        wandb.login(key=wandb_key)
 
     print("Loading dataset...")
 
@@ -99,70 +102,43 @@ def main():
     )
 
     train_dataset = dataset["train"]
-    validation_dataset = dataset[
-        "validation"
-    ]
+    validation_dataset = dataset["validation"]
 
     print("Loading tokenizer...")
 
-    tokenizer = (
-        AutoTokenizer
-        .from_pretrained(
-            BASE_MODEL
-        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        BASE_MODEL
     )
 
-    tokenizer.pad_token = (
-        tokenizer.eos_token
-    )
-
+    tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    capability = (
-        torch.cuda
-        .get_device_capability()
-    )
-
+    capability = torch.cuda.get_device_capability()
     use_bf16 = capability[0] >= 8
 
-    print(
-        "Using BF16:",
-        use_bf16,
+    print("Using BF16:", use_bf16)
+
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=(
+            torch.bfloat16
+            if use_bf16
+            else torch.float16
+        ),
     )
 
-    quantization_config = (
-        BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=(
-                torch.bfloat16
-                if use_bf16
-                else torch.float16
-            ),
-        )
-    )
+    print(f"Loading {BASE_MODEL}...")
 
-    print(
-        "Loading Llama 3.2 3B..."
-    )
-
-    model = (
-        AutoModelForCausalLM
-        .from_pretrained(
-            BASE_MODEL,
-            quantization_config=(
-                quantization_config
-            ),
-            device_map="auto",
-        )
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL,
+        quantization_config=quantization_config,
+        device_map="auto",
     )
 
     model.config.use_cache = False
-
-    model.generation_config.pad_token_id = (
-        tokenizer.pad_token_id
-    )
+    model.generation_config.pad_token_id = tokenizer.pad_token_id
 
     print(
         "Model memory:",
@@ -183,10 +159,7 @@ def main():
 
         num_train_epochs=EPOCHS,
 
-        per_device_train_batch_size=(
-            BATCH_SIZE
-        ),
-
+        per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=1,
 
         gradient_accumulation_steps=(
@@ -218,9 +191,7 @@ def main():
 
         save_total_limit=2,
 
-        max_length=(
-            MAX_SEQUENCE_LENGTH
-        ),
+        max_length=MAX_SEQUENCE_LENGTH,
 
         report_to=(
             "wandb"
@@ -228,39 +199,29 @@ def main():
             else "none"
         ),
 
-        run_name=(
-            "customer-support-qlora"
-        ),
+        run_name="customer-support-qlora",
     )
 
     trainer = SFTTrainer(
         model=model,
         args=training_config,
-
-        train_dataset=(
-            train_dataset
-        ),
-
-        eval_dataset=(
-            validation_dataset
-        ),
-
+        train_dataset=train_dataset,
+        eval_dataset=validation_dataset,
         peft_config=lora_config,
     )
 
     print()
-    print(
-        "Starting QLoRA training..."
-    )
+    print("Starting QLoRA training...")
 
     trainer.train()
 
-    Path(
-        OUTPUT_DIR
-    ).mkdir(
+    Path(OUTPUT_DIR).mkdir(
         parents=True,
         exist_ok=True,
     )
+
+    print()
+    print("Saving trained adapter locally...")
 
     trainer.model.save_pretrained(
         OUTPUT_DIR
@@ -270,10 +231,35 @@ def main():
         OUTPUT_DIR
     )
 
+    print(
+        f"Local model saved to: {OUTPUT_DIR}"
+    )
+
     print()
     print(
-        f"Model saved to {OUTPUT_DIR}"
+        f"Uploading trained model to Hugging Face: {HF_MODEL_REPO}"
     )
+
+    trainer.model.push_to_hub(
+        HF_MODEL_REPO,
+        token=hf_token,
+        private=True,
+    )
+
+    tokenizer.push_to_hub(
+        HF_MODEL_REPO,
+        token=hf_token,
+        private=True,
+    )
+
+    print()
+    print("=================================")
+    print("TRAINING COMPLETE")
+    print("=================================")
+    print(f"Backup: {OUTPUT_DIR}")
+    print(f"Hugging Face: {HF_MODEL_REPO}")
+    print("The trained adapter is now persistent.")
+    print("=================================")
 
     if use_wandb:
         wandb.finish()
