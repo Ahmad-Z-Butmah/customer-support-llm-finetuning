@@ -25,7 +25,7 @@ from trl import (
 load_dotenv()
 
 
-BASE_MODEL = "meta-llama/Llama-3.2-3B"
+BASE_MODEL = "Qwen/Qwen2.5-3B"
 
 TRAIN_FILE = "data/train.jsonl"
 VALIDATION_FILE = "data/validation.jsonl"

@@ -12,7 +12,7 @@ from peft import PeftModel
 
 
 BASE_MODEL = (
-    "meta-llama/Llama-3.2-3B"
+    "Qwen/Qwen2.5-3B"
 )
 
 ADAPTER_PATH = (
